@@ -3,6 +3,7 @@ from typing import Dict, List, Tuple
 import streamlit as st
 
 from where_to_live.constants import PLACE_TYPE_TO_OVERPASS, TIME_PROFILES, TRANSPORT_OPTIONS
+from where_to_live.debug import debug_log
 from where_to_live.models import Anchor
 from where_to_live.services import geocode_address
 
@@ -151,20 +152,28 @@ def render_anchor_editor() -> List[Anchor]:
 def resolve_addresses(anchors: List[Anchor]) -> Tuple[Dict[str, Tuple[float, float]], List[str]]:
     errors: List[str] = []
     address_coords: Dict[str, Tuple[float, float]] = {}
+    debug_log(f"Resolving addresses for {len(anchors)} anchors")
 
     for anchor in anchors:
         if not anchor.name:
             errors.append("One anchor is missing a name.")
+            debug_log("Anchor resolution warning: one anchor is missing a name")
             continue
 
         if anchor.location_type == "Exact Address":
             if not anchor.address:
                 errors.append(f"'{anchor.name}' needs an address.")
+                debug_log(f"Anchor '{anchor.name}' is missing an address")
                 continue
             coord = geocode_address(anchor.address)
             if not coord:
                 errors.append(f"Could not locate address for '{anchor.name}'.")
+                debug_log(f"Geocode failed for anchor '{anchor.name}'")
                 continue
             address_coords[anchor.name] = coord
+            debug_log(f"Anchor '{anchor.name}' resolved to ({coord[0]:.6f}, {coord[1]:.6f})")
 
+    debug_log(
+        f"Address resolution completed with {len(address_coords)} successful anchors and {len(errors)} validation errors"
+    )
     return address_coords, errors
