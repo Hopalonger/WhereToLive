@@ -17,7 +17,7 @@ def set_debug_placeholder(placeholder: Optional["st.delta_generator.DeltaGenerat
     st.session_state[DEBUG_PLACEHOLDER_KEY] = placeholder
 
 
-def _render_live_debug_log() -> None:
+def render_live_debug_log() -> None:
     placeholder = st.session_state.get(DEBUG_PLACEHOLDER_KEY)
     if not placeholder:
         return
@@ -31,4 +31,3 @@ def debug_log(message: str) -> None:
     entry = f"[{timestamp}] {message}"
     st.session_state.setdefault(DEBUG_LOG_KEY, []).append(entry)
     print(entry)
-    _render_live_debug_log()

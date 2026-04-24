@@ -5,7 +5,7 @@ import numpy as np
 import streamlit as st
 
 from where_to_live.constants import PLACE_TYPE_TO_OVERPASS
-from where_to_live.debug import clear_debug_logs, debug_log, set_debug_placeholder
+from where_to_live.debug import clear_debug_logs, debug_log, render_live_debug_log, set_debug_placeholder
 from where_to_live.map_view import build_map
 from where_to_live.scoring import color_for_minutes, compute_score_for_home, generate_grid, point_in_geojson
 from where_to_live.services import fetch_isochrone_geojson, fetch_pois, fetch_pois_nominatim
@@ -18,12 +18,21 @@ st.caption("Configure anchors, generate a commute heatmap, and explore candidate
 
 with st.sidebar:
     st.header("Settings")
-    ors_api_key = st.text_input("OpenRouteService API Key (optional)", type="password")
-    st.info("If no key is provided, travel time is estimated by distance + average speed.")
+    ors_api_key = st.text_input("OpenRouteService API Key (required for isochrones)", type="password")
+    st.info("Isochrone generation requires a valid OpenRouteService API key.")
+    transport_mode = st.selectbox(
+        "Isochrone Transport Mode",
+        options=["driving-car", "cycling-regular", "foot-walking"],
+        index=0,
+    )
+    range_type = st.selectbox("Isochrone Range Type", options=["distance", "time"], index=0)
+    if range_type == "distance":
+        isochrone_value = st.slider("Isochrone Distance (km)", 1, 100, 12, step=1)
+    else:
+        isochrone_value = st.slider("Isochrone Time (minutes)", 5, 120, 45, step=5)
     search_radius_km = st.slider("Search Radius (km)", 2, 35, 10)
     grid_side = st.slider("Map Resolution", 6, 30, 12)
     poi_radius_m = st.slider("POI Search Radius (meters)", 1000, 30000, 12000, step=500)
-    isochrone_minutes = st.slider("Road Reachability Limit (minutes)", 10, 120, 45, step=5)
 
 anchors = render_anchor_editor()
 address_coords, address_errors = resolve_addresses(anchors)
@@ -31,11 +40,14 @@ ors_api_key = ors_api_key.strip()
 
 if "heatmap_results" not in st.session_state:
     st.session_state["heatmap_results"] = None
+if "isochrone_results" not in st.session_state:
+    st.session_state["isochrone_results"] = None
 
 st.subheader("Live Debug Log")
 debug_log_placeholder = st.empty()
 set_debug_placeholder(debug_log_placeholder)
 debug_log("UI render cycle started")
+render_live_debug_log()
 
 if address_coords:
     center = (
@@ -56,9 +68,15 @@ if address_errors:
 if st.button("Generate Commute Heatmap", type="primary"):
     clear_debug_logs()
     debug_log("Heatmap generation triggered by user")
+    st.session_state["heatmap_results"] = None
+    st.session_state["isochrone_results"] = None
     if not address_coords:
         st.error("Please add at least one valid exact address anchor before generating the heatmap.")
         debug_log("Heatmap generation aborted: no valid exact-address anchors")
+        st.stop()
+    if not ors_api_key:
+        st.error("An OpenRouteService API key is required to generate isochrones.")
+        debug_log("Heatmap generation aborted: ORS API key missing")
         st.stop()
 
     pois_by_type: Dict[str, List[Tuple[float, float]]] = {}
@@ -83,33 +101,47 @@ if st.button("Generate Commute Heatmap", type="primary"):
                 st.write(f"{anchor.place_type}: found {len(pois_by_type[anchor.place_type])} matches")
                 debug_log(f"POI fetch completed for '{anchor.place_type}': {len(points)} points")
 
-    if ors_api_key:
-        st.caption("OpenRouteService API key provided: live routing requests enabled.")
-    else:
-        st.caption("No OpenRouteService API key provided: using distance/speed fallback estimates.")
+    st.caption("OpenRouteService API key provided: live routing requests enabled.")
 
     cells = generate_grid(center, search_radius_km, grid_side)
     debug_log(f"Generated {len(cells)} grid cells (radius_km={search_radius_km}, side={grid_side})")
-    if ors_api_key:
-        primary_mode = "driving-car"
-        origin_for_iso = next(iter(address_coords.values()))
+    isochrone_features: List[Dict] = []
+    for anchor_name, origin_for_iso in address_coords.items():
         isochrone = fetch_isochrone_geojson(
             origin_for_iso[0],
             origin_for_iso[1],
-            primary_mode,
-            isochrone_minutes,
+            transport_mode,
+            isochrone_value,
+            range_type,
             ors_api_key or None,
         )
         if isochrone and isochrone.get("features"):
-            polygon_geometry = isochrone["features"][0].get("geometry", {})
-            cells = [pt for pt in cells if point_in_geojson(pt[0], pt[1], polygon_geometry)]
-            debug_log(f"Isochrone clip retained {len(cells)} candidate cells")
-            st.caption(
-                f"Road-aware isochrone filter kept {len(cells)} candidate cells within about {isochrone_minutes} minutes."
-            )
+            feature = isochrone["features"][0]
+            feature.setdefault("properties", {})
+            feature["properties"]["anchor_name"] = anchor_name
+            isochrone_features.append(feature)
+            debug_log(f"Isochrone generated for anchor '{anchor_name}'")
         else:
-            st.warning("Could not load isochrone filter from OpenRouteService. Continuing without road-area clipping.")
-            debug_log("Isochrone clip unavailable; continuing with full grid")
+            debug_log(f"Isochrone generation failed for anchor '{anchor_name}'")
+
+    if not isochrone_features:
+        st.error("OpenRouteService could not generate any isochrones. Verify your API key and try again.")
+        debug_log("Heatmap generation aborted: no isochrones were returned")
+        st.stop()
+
+    first_polygon_geometry = isochrone_features[0].get("geometry", {})
+    cells = [pt for pt in cells if point_in_geojson(pt[0], pt[1], first_polygon_geometry)]
+    debug_log(f"Isochrone clip retained {len(cells)} candidate cells based on the first anchor")
+    st.session_state["isochrone_results"] = {
+        "features": isochrone_features,
+        "transport_mode": transport_mode,
+        "range_type": range_type,
+        "isochrone_value": isochrone_value,
+    }
+    if range_type == "distance":
+        st.caption(f"Isochrone overlay generated at {isochrone_value} km for mode '{transport_mode}'.")
+    else:
+        st.caption(f"Isochrone overlay generated at {isochrone_value} minutes for mode '{transport_mode}'.")
 
     total_trips = max(sum(a.trips_per_week for a in anchors if a.trips_per_week > 0), 1)
 
@@ -147,6 +179,7 @@ if st.button("Generate Commute Heatmap", type="primary"):
     debug_log("Heatmap results saved to session state")
 
 heatmap_results = st.session_state.get("heatmap_results")
+isochrone_results = st.session_state.get("isochrone_results")
 if heatmap_results and heatmap_results.get("score_rows"):
     score_rows = heatmap_results["score_rows"]
     best = score_rows[0]
@@ -155,8 +188,14 @@ if heatmap_results and heatmap_results.get("score_rows"):
     c1.metric("Best Weekly Minutes", f"{best['weekly_minutes']:.1f}")
     c2.metric("Best Avg Minutes per Trip", f"{best['avg_minutes_per_trip']:.1f}")
 
-    st.subheader("Heatmap + Pins")
-    build_map(center, address_coords, score_rows, map_key="heatmap_map")
+    st.subheader("Isochrone + Anchors")
+    build_map(
+        center,
+        address_coords,
+        score_rows=None,
+        isochrone_features=isochrone_results.get("features") if isochrone_results else None,
+        map_key="heatmap_map",
+    )
 
     if heatmap_results.get("ors_key_was_provided"):
         if st.session_state.get("ors_request_succeeded"):
@@ -175,3 +214,5 @@ if heatmap_results and heatmap_results.get("score_rows"):
             st.info(
                 f"Excluded {unroutable} unroutable route attempts (for example across water or disconnected roads)."
             )
+
+render_live_debug_log()
