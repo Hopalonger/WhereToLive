@@ -38,8 +38,9 @@ def _point_in_ring(lat: float, lon: float, ring: List[List[float]]) -> bool:
         return False
     j = len(ring) - 1
     for i in range(len(ring)):
-        xi, yi = ring[i][1], ring[i][0]
-        xj, yj = ring[j][1], ring[j][0]
+        # GeoJSON coordinate order is [lon, lat].
+        xi, yi = ring[i][0], ring[i][1]
+        xj, yj = ring[j][0], ring[j][1]
         crosses = (yi > lat) != (yj > lat)
         if crosses:
             xinters = (xj - xi) * (lat - yi) / ((yj - yi) or 1e-12) + xi

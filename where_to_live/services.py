@@ -98,9 +98,9 @@ def fetch_pois(
     out body center;
     """
     try:
-        response = requests.get(
+        response = requests.post(
             "https://overpass-api.de/api/interpreter",
-            params={"data": query},
+            data={"data": query},
             timeout=35,
         )
         response.raise_for_status()
@@ -176,24 +176,32 @@ def fetch_isochrone_geojson(
     origin_lat: float,
     origin_lon: float,
     mode_code: str,
-    max_minutes: int,
+    max_value: int,
+    range_type: str,
     ors_api_key: Optional[str],
 ) -> Optional[dict]:
     if not ors_api_key or mode_code == "transit":
         debug_log("Isochrone fetch skipped: missing ORS key or unsupported transit mode")
         return None
 
+    if range_type not in {"time", "distance"}:
+        debug_log(f"Isochrone fetch skipped: unsupported range type '{range_type}'")
+        return None
+
+    range_payload_value = max_value * 60 if range_type == "time" else max_value * 1000
+
     try:
         debug_log(
             f"Fetching ORS isochrone (origin=({origin_lat:.5f},{origin_lon:.5f}), "
-            f"mode={mode_code}, max_minutes={max_minutes})"
+            f"mode={mode_code}, range_type={range_type}, max_value={max_value})"
         )
         response = requests.post(
             f"https://api.openrouteservice.org/v2/isochrones/{mode_code}",
             headers={"Authorization": ors_api_key, "Content-Type": "application/json"},
             json={
                 "locations": [[origin_lon, origin_lat]],
-                "range": [max_minutes * 60],
+                "range": [range_payload_value],
+                "range_type": range_type,
                 "location_type": "start",
                 "smoothing": 0.2,
             },
