@@ -8,6 +8,7 @@ def build_map(
     center: Tuple[float, float],
     address_coords: Dict[str, Tuple[float, float]],
     score_rows: Optional[List[Dict[str, float]]] = None,
+    map_key: str = "map",
 ) -> None:
     fmap = folium.Map(location=[center[0], center[1]], zoom_start=11, tiles="CartoDB positron")
 
@@ -33,4 +34,4 @@ def build_map(
                 ),
             ).add_to(fmap)
 
-    st_folium(fmap, use_container_width=True, height=560)
+    st_folium(fmap, use_container_width=True, height=560, key=map_key)
