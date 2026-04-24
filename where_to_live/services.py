@@ -62,15 +62,7 @@ def fetch_pois(
     if not overpass_filters:
         return []
 
-    filter_lines = []
-    for filter_expr in overpass_filters:
-        filter_lines.extend(
-            [
-                f"node[{filter_expr}](around:{radius_m},{center_lat},{center_lon});",
-                f"way[{filter_expr}](around:{radius_m},{center_lat},{center_lon});",
-                f"relation[{filter_expr}](around:{radius_m},{center_lat},{center_lon});",
-            ]
-        )
+    filter_lines = [f"nwr[{filter_expr}](around:{radius_m},{center_lat},{center_lon});" for filter_expr in overpass_filters]
 
     query = f"""
     [out:json][timeout:25];
