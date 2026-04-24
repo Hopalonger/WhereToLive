@@ -1,5 +1,5 @@
 from functools import lru_cache
-from typing import List, Optional, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 import requests
 import streamlit as st
@@ -42,9 +42,10 @@ def route_minutes(
             response = requests.post(url, headers=headers, json=body, timeout=20)
             response.raise_for_status()
             seconds = response.json()["routes"][0]["summary"]["duration"]
+            st.session_state["ors_request_succeeded"] = True
             return seconds / 60
-        except Exception:
-            pass
+        except Exception as exc:
+            st.session_state["ors_last_error"] = str(exc)
 
     distance_km = geodesic((origin_lat, origin_lon), (dest_lat, dest_lon)).km
     speed_kmph = SPEED_KMPH_FALLBACK.get(mode_code, 25)
@@ -52,13 +53,23 @@ def route_minutes(
 
 
 @st.cache_data(show_spinner=False)
-def fetch_pois(center_lat: float, center_lon: float, radius_m: int, overpass_filter: str) -> List[Tuple[float, float]]:
+def fetch_pois(
+    center_lat: float,
+    center_lon: float,
+    radius_m: int,
+    overpass_filters: Sequence[str],
+) -> List[Tuple[float, float]]:
+    if not overpass_filters:
+        return []
+
+    filter_lines = [f"nwr[{filter_expr}](around:{radius_m},{center_lat},{center_lon});" for filter_expr in overpass_filters]
+
     query = f"""
     [out:json][timeout:25];
     (
-      {overpass_filter}
-    )(around:{radius_m},{center_lat},{center_lon});
-    out body;
+      {" ".join(filter_lines)}
+    );
+    out center;
     """
     try:
         response = requests.get(
@@ -68,6 +79,14 @@ def fetch_pois(center_lat: float, center_lon: float, radius_m: int, overpass_fil
         )
         response.raise_for_status()
         elements = response.json().get("elements", [])
-        return [(el["lat"], el["lon"]) for el in elements if "lat" in el and "lon" in el]
+        points: List[Tuple[float, float]] = []
+        for el in elements:
+            if "lat" in el and "lon" in el:
+                points.append((el["lat"], el["lon"]))
+            elif "center" in el and "lat" in el["center"] and "lon" in el["center"]:
+                points.append((el["center"]["lat"], el["center"]["lon"]))
+
+        # Keep unique results while preserving order.
+        return list(dict.fromkeys(points))
     except Exception:
         return []

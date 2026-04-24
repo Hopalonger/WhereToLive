@@ -24,6 +24,10 @@ with st.sidebar:
 
 anchors = render_anchor_editor()
 address_coords, address_errors = resolve_addresses(anchors)
+ors_api_key = ors_api_key.strip()
+
+if "heatmap_results" not in st.session_state:
+    st.session_state["heatmap_results"] = None
 
 if address_coords:
     center = (
@@ -35,7 +39,7 @@ else:
 
 st.subheader("Map")
 st.write("Map loads immediately for exploration. Pins mark any exact-address anchors.")
-build_map(center, address_coords)
+build_map(center, address_coords, map_key="base_map")
 
 if address_errors:
     for msg in address_errors:
@@ -47,15 +51,22 @@ if st.button("Generate Commute Heatmap", type="primary"):
         st.stop()
 
     pois_by_type: Dict[str, List[Tuple[float, float]]] = {}
+    st.session_state["ors_request_succeeded"] = False
+    st.session_state.pop("ors_last_error", None)
     for anchor in anchors:
         if anchor.location_type == "Type of Place":
-            filter_expr = PLACE_TYPE_TO_OVERPASS.get(anchor.place_type)
-            if not filter_expr:
+            filter_exprs = PLACE_TYPE_TO_OVERPASS.get(anchor.place_type)
+            if not filter_exprs:
                 st.warning(f"Unsupported place type for '{anchor.name}'.")
                 continue
             if anchor.place_type not in pois_by_type:
-                pois_by_type[anchor.place_type] = fetch_pois(center[0], center[1], poi_radius_m, filter_expr)
+                pois_by_type[anchor.place_type] = fetch_pois(center[0], center[1], poi_radius_m, filter_exprs)
                 st.write(f"{anchor.place_type}: found {len(pois_by_type[anchor.place_type])} matches")
+
+    if ors_api_key:
+        st.caption("OpenRouteService API key provided: live routing requests enabled.")
+    else:
+        st.caption("No OpenRouteService API key provided: using distance/speed fallback estimates.")
 
     cells = generate_grid(center, search_radius_km, grid_side)
     total_trips = max(sum(a.trips_per_week for a in anchors if a.trips_per_week > 0), 1)
@@ -75,6 +86,14 @@ if st.button("Generate Commute Heatmap", type="primary"):
         )
 
     score_rows = sorted(score_rows, key=lambda x: x["weekly_minutes"])
+    st.session_state["heatmap_results"] = {
+        "score_rows": score_rows,
+        "ors_key_was_provided": bool(ors_api_key),
+    }
+
+heatmap_results = st.session_state.get("heatmap_results")
+if heatmap_results and heatmap_results.get("score_rows"):
+    score_rows = heatmap_results["score_rows"]
     best = score_rows[0]
 
     c1, c2 = st.columns(2)
@@ -82,4 +101,13 @@ if st.button("Generate Commute Heatmap", type="primary"):
     c2.metric("Best Avg Minutes per Trip", f"{best['avg_minutes_per_trip']:.1f}")
 
     st.subheader("Heatmap + Pins")
-    build_map(center, address_coords, score_rows)
+    build_map(center, address_coords, score_rows, map_key="heatmap_map")
+
+    if heatmap_results.get("ors_key_was_provided"):
+        if st.session_state.get("ors_request_succeeded"):
+            st.success("OpenRouteService requests succeeded for this heatmap run.")
+        elif st.session_state.get("ors_last_error"):
+            st.warning(
+                "OpenRouteService key was provided, but requests failed and fallback estimates were used. "
+                f"Latest error: {st.session_state['ors_last_error']}"
+            )
