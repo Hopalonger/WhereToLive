@@ -6,11 +6,19 @@ TRANSPORT_OPTIONS = {
 }
 
 PLACE_TYPE_TO_OVERPASS = {
-    "Grocery Store": '(node["shop"="supermarket"];node["shop"="grocery"];)',
-    "Gym / Fitness": '(node["leisure"="fitness_centre"];node["amenity"="gym"];)',
-    "Coffee Shop": '(node["amenity"="cafe"];)',
-    "Mountain / Trail": '(node["natural"="peak"];node["highway"="path"];node["route"="hiking"];)',
-    "Park": '(node["leisure"="park"];)',
+    "Grocery Store": [
+        '"shop"="supermarket"',
+        '"shop"="grocery"',
+        '"shop"="convenience"',
+    ],
+    "Gym / Fitness": [
+        '"leisure"="fitness_centre"',
+        '"amenity"="gym"',
+        '"sport"="fitness"',
+    ],
+    "Coffee Shop": ['"amenity"="cafe"', '"shop"="coffee"'],
+    "Mountain / Trail": ['"natural"="peak"', '"highway"="path"', '"route"="hiking"'],
+    "Park": ['"leisure"="park"'],
 }
 
 TIME_PROFILES = ["Average", "Worst Case", "Custom Departure Time"]
