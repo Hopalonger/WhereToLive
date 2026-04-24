@@ -1,3 +1,4 @@
+import math
 from functools import lru_cache
 from typing import List, Optional, Sequence, Tuple
 
@@ -6,7 +7,7 @@ import streamlit as st
 from geopy.distance import geodesic
 from geopy.geocoders import Nominatim
 
-from where_to_live.constants import SPEED_KMPH_FALLBACK
+from where_to_live.constants import PLACE_TYPE_TO_NOMINATIM_QUERY, SPEED_KMPH_FALLBACK
 
 
 @st.cache_resource
@@ -31,6 +32,8 @@ def route_minutes(
     mode_code: str,
     ors_api_key: Optional[str],
 ) -> float:
+    st.session_state["ors_request_count"] = int(st.session_state.get("ors_request_count", 0))
+
     if ors_api_key and mode_code != "transit":
         url = f"https://api.openrouteservice.org/v2/directions/{mode_code}"
         headers = {"Authorization": ors_api_key, "Content-Type": "application/json"}
@@ -43,9 +46,12 @@ def route_minutes(
             response.raise_for_status()
             seconds = response.json()["routes"][0]["summary"]["duration"]
             st.session_state["ors_request_succeeded"] = True
+            st.session_state["ors_request_count"] += 1
             return seconds / 60
         except Exception as exc:
             st.session_state["ors_last_error"] = str(exc)
+            st.session_state["ors_unroutable_count"] = int(st.session_state.get("ors_unroutable_count", 0)) + 1
+            return math.inf
 
     distance_km = geodesic((origin_lat, origin_lon), (dest_lat, dest_lon)).km
     speed_kmph = SPEED_KMPH_FALLBACK.get(mode_code, 25)
@@ -69,7 +75,7 @@ def fetch_pois(
     (
       {" ".join(filter_lines)}
     );
-    out center;
+    out body center;
     """
     try:
         response = requests.get(
@@ -90,3 +96,77 @@ def fetch_pois(
         return list(dict.fromkeys(points))
     except Exception:
         return []
+
+
+@st.cache_data(show_spinner=False)
+def fetch_pois_nominatim(
+    center_lat: float,
+    center_lon: float,
+    radius_m: int,
+    place_type: str,
+) -> List[Tuple[float, float]]:
+    query = PLACE_TYPE_TO_NOMINATIM_QUERY.get(place_type)
+    if not query:
+        return []
+
+    approx_lat_delta = radius_m / 111000
+    approx_lon_delta = radius_m / (111000 * max(abs(math.cos(math.radians(center_lat))), 0.2))
+    viewbox = f"{center_lon - approx_lon_delta},{center_lat + approx_lat_delta},{center_lon + approx_lon_delta},{center_lat - approx_lat_delta}"
+
+    try:
+        response = requests.get(
+            "https://nominatim.openstreetmap.org/search",
+            params={
+                "q": query,
+                "format": "jsonv2",
+                "limit": 80,
+                "bounded": 1,
+                "viewbox": viewbox,
+            },
+            headers={"User-Agent": "where-to-live-optimizer"},
+            timeout=30,
+        )
+        response.raise_for_status()
+        rows = response.json()
+        points = []
+        for row in rows:
+            lat = row.get("lat")
+            lon = row.get("lon")
+            if lat is None or lon is None:
+                continue
+            points.append((float(lat), float(lon)))
+        return list(dict.fromkeys(points))
+    except Exception:
+        return []
+
+
+@st.cache_data(show_spinner=False)
+def fetch_isochrone_geojson(
+    origin_lat: float,
+    origin_lon: float,
+    mode_code: str,
+    max_minutes: int,
+    ors_api_key: Optional[str],
+) -> Optional[dict]:
+    if not ors_api_key or mode_code == "transit":
+        return None
+
+    try:
+        response = requests.post(
+            f"https://api.openrouteservice.org/v2/isochrones/{mode_code}",
+            headers={"Authorization": ors_api_key, "Content-Type": "application/json"},
+            json={
+                "locations": [[origin_lon, origin_lat]],
+                "range": [max_minutes * 60],
+                "location_type": "start",
+                "smoothing": 0.2,
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+        st.session_state["ors_request_succeeded"] = True
+        st.session_state["ors_request_count"] = int(st.session_state.get("ors_request_count", 0)) + 1
+        return response.json()
+    except Exception as exc:
+        st.session_state["ors_last_error"] = str(exc)
+        return None
