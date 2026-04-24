@@ -5,6 +5,7 @@ import numpy as np
 from geopy.distance import geodesic
 
 from where_to_live.constants import TRANSPORT_OPTIONS
+from where_to_live.debug import debug_log
 from where_to_live.models import Anchor
 from where_to_live.services import route_minutes
 
@@ -84,15 +85,20 @@ def compute_score_for_home(
     pois_by_type: Dict[str, List[Tuple[float, float]]],
     ors_api_key: Optional[str],
 ) -> float:
+    debug_log(f"Scoring candidate home at ({home[0]:.5f}, {home[1]:.5f})")
     total_weekly_minutes = 0.0
 
     for anchor in anchors:
         if anchor.trips_per_week <= 0:
+            debug_log(f"Skipping anchor '{anchor.name}' because trips_per_week <= 0")
             continue
 
         if anchor.after_anchor:
             origin = address_coords.get(anchor.after_anchor)
             if not origin:
+                debug_log(
+                    f"Skipping anchor '{anchor.name}' because after_anchor '{anchor.after_anchor}' has no resolved location"
+                )
                 continue
         else:
             origin = home
@@ -102,11 +108,13 @@ def compute_score_for_home(
         if anchor.location_type == "Exact Address":
             destination = address_coords.get(anchor.name)
             if not destination:
+                debug_log(f"Skipping exact-address anchor '{anchor.name}' because destination coordinates are missing")
                 continue
             minutes = route_minutes(origin[0], origin[1], destination[0], destination[1], mode_code, ors_api_key)
         else:
             poi_candidates = pois_by_type.get(anchor.place_type, [])
             if not poi_candidates:
+                debug_log(f"Skipping place-type anchor '{anchor.name}' because no POIs were available")
                 continue
             nearest_candidates = sorted(poi_candidates, key=lambda p: geodesic(origin, p).km)[:12]
             minutes = min(
@@ -115,6 +123,11 @@ def compute_score_for_home(
             )
 
         minutes *= time_profile_multiplier(anchor.time_profile, anchor.custom_departure)
+        debug_log(
+            f"Anchor '{anchor.name}' contributed {minutes * anchor.trips_per_week:.2f} weekly minutes "
+            f"({minutes:.2f} minutes/trip x {anchor.trips_per_week:.0f} trips)"
+        )
         total_weekly_minutes += minutes * anchor.trips_per_week
 
+    debug_log(f"Candidate home final weekly score: {total_weekly_minutes:.2f} minutes")
     return total_weekly_minutes
