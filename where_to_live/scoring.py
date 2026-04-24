@@ -31,6 +31,45 @@ def generate_grid(center: Tuple[float, float], radius_km: float, points_per_side
     return [(float(la), float(lo)) for la in lats for lo in lons]
 
 
+def _point_in_ring(lat: float, lon: float, ring: List[List[float]]) -> bool:
+    inside = False
+    if not ring:
+        return False
+    j = len(ring) - 1
+    for i in range(len(ring)):
+        xi, yi = ring[i][1], ring[i][0]
+        xj, yj = ring[j][1], ring[j][0]
+        crosses = (yi > lat) != (yj > lat)
+        if crosses:
+            xinters = (xj - xi) * (lat - yi) / ((yj - yi) or 1e-12) + xi
+            if lon < xinters:
+                inside = not inside
+        j = i
+    return inside
+
+
+def _point_in_polygon(lat: float, lon: float, polygon_coords: List[List[List[float]]]) -> bool:
+    if not polygon_coords:
+        return False
+    if not _point_in_ring(lat, lon, polygon_coords[0]):
+        return False
+    # Holes should exclude points.
+    for hole in polygon_coords[1:]:
+        if _point_in_ring(lat, lon, hole):
+            return False
+    return True
+
+
+def point_in_geojson(lat: float, lon: float, geometry: dict) -> bool:
+    gtype = geometry.get("type")
+    coords = geometry.get("coordinates", [])
+    if gtype == "Polygon":
+        return _point_in_polygon(lat, lon, coords)
+    if gtype == "MultiPolygon":
+        return any(_point_in_polygon(lat, lon, poly) for poly in coords)
+    return False
+
+
 def color_for_minutes(avg_minutes_per_trip: float) -> str:
     ratio = max(0.0, min(1.0, (avg_minutes_per_trip - 20) / 40))
     red = int(255 * ratio)

@@ -21,6 +21,14 @@ PLACE_TYPE_TO_OVERPASS = {
     "Park": ['"leisure"="park"'],
 }
 
+PLACE_TYPE_TO_NOMINATIM_QUERY = {
+    "Grocery Store": "grocery supermarket",
+    "Gym / Fitness": "gym fitness centre",
+    "Coffee Shop": "coffee shop cafe",
+    "Mountain / Trail": "trailhead hiking trail",
+    "Park": "public park",
+}
+
 TIME_PROFILES = ["Average", "Worst Case", "Custom Departure Time"]
 SPEED_KMPH_FALLBACK = {
     "driving-car": 40,
