@@ -3,51 +3,48 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Dict, List, Optional, Tuple
 
-import folium
 import numpy as np
+import pandas as pd
+import pydeck as pdk
 import requests
 import streamlit as st
 from geopy.distance import geodesic
 from geopy.geocoders import Nominatim
-from streamlit_folium import st_folium
 
-st.set_page_config(page_title="Where To Live Optimizer", page_icon="🏠", layout="wide")
+st.set_page_config(page_title="Where To Live", page_icon="🏠", layout="wide")
 
-TRANSPORT_OPTIONS = {
-    "Drive": "driving-car",
-    "Bike": "cycling-regular",
-    "Walk": "foot-walking",
-    "Public Transit": "transit",
-}
 
 PLACE_TYPE_TO_OVERPASS = {
     "Grocery Store": '(node["shop"="supermarket"];node["shop"="grocery"];)',
-    "Gym / Fitness": '(node["leisure"="fitness_centre"];node["amenity"="gym"];)',
+    "Gym": '(node["leisure"="fitness_centre"];node["amenity"="gym"];)',
     "Coffee Shop": '(node["amenity"="cafe"];)',
     "Mountain / Trail": '(node["natural"="peak"];node["highway"="path"];node["route"="hiking"];)',
     "Park": '(node["leisure"="park"];)',
 }
 
-TIME_PROFILES = ["Average", "Worst Case", "Custom Departure Time"]
-SPEED_KMPH_FALLBACK = {"driving-car": 40, "cycling-regular": 18, "foot-walking": 5, "transit": 25}
+SPEED_KMPH_FALLBACK = {
+    "driving-car": 40,
+    "cycling-regular": 18,
+    "foot-walking": 5,
+    "transit": 25,
+}
+
+MODE_OPTIONS = ["driving-car", "cycling-regular", "foot-walking", "transit"]
 
 
 @dataclass
 class Anchor:
     name: str
-    location_type: str
-    address: str
-    place_type: str
-    transport_mode_label: str
-    trips_per_week: float
+    kind: str  # address or place_type
+    value: str
+    mode: str
+    frequency: float
     after_anchor: Optional[str]
-    time_profile: str
-    custom_departure: Optional[str]
 
 
 @st.cache_resource
 def geocoder() -> Nominatim:
-    return Nominatim(user_agent="where-to-live-optimizer")
+    return Nominatim(user_agent="where-to-live-app")
 
 
 @st.cache_data(show_spinner=False)
@@ -58,50 +55,44 @@ def geocode_address(address: str) -> Optional[Tuple[float, float]]:
     return (result.latitude, result.longitude)
 
 
-def time_profile_multiplier(profile: str, custom_departure: Optional[str]) -> float:
-    if profile == "Worst Case":
-        return 1.5
-    if profile == "Custom Departure Time" and custom_departure:
-        hour = int(custom_departure.split(":")[0])
-        if 7 <= hour <= 9 or 16 <= hour <= 19:
-            return 1.3
-        if 0 <= hour <= 5:
-            return 1.15
-        return 0.95
-    return 1.0
-
-
-@lru_cache(maxsize=12000)
+@lru_cache(maxsize=8000)
 def route_minutes(
     origin_lat: float,
     origin_lon: float,
     dest_lat: float,
     dest_lon: float,
-    mode_code: str,
+    mode: str,
     ors_api_key: Optional[str],
 ) -> float:
-    if ors_api_key and mode_code != "transit":
-        url = f"https://api.openrouteservice.org/v2/directions/{mode_code}"
+    if ors_api_key:
+        url = f"https://api.openrouteservice.org/v2/directions/{mode}"
         headers = {"Authorization": ors_api_key, "Content-Type": "application/json"}
         body = {
             "coordinates": [[origin_lon, origin_lat], [dest_lon, dest_lat]],
             "instructions": False,
         }
         try:
-            response = requests.post(url, headers=headers, json=body, timeout=20)
-            response.raise_for_status()
-            seconds = response.json()["routes"][0]["summary"]["duration"]
+            resp = requests.post(url, headers=headers, json=body, timeout=20)
+            resp.raise_for_status()
+            data = resp.json()
+            seconds = data["routes"][0]["summary"]["duration"]
             return seconds / 60
         except Exception:
             pass
 
-    distance_km = geodesic((origin_lat, origin_lon), (dest_lat, dest_lon)).km
-    speed_kmph = SPEED_KMPH_FALLBACK.get(mode_code, 25)
-    return (distance_km / speed_kmph) * 60
+    # Fallback approximation if ORS fails or key missing.
+    km = geodesic((origin_lat, origin_lon), (dest_lat, dest_lon)).km
+    speed = SPEED_KMPH_FALLBACK.get(mode, 25)
+    return (km / speed) * 60
 
 
 @st.cache_data(show_spinner=False)
-def fetch_pois(center_lat: float, center_lon: float, radius_m: int, overpass_filter: str) -> List[Tuple[float, float]]:
+def fetch_pois(
+    center_lat: float,
+    center_lon: float,
+    radius_m: int,
+    overpass_filter: str,
+) -> List[Tuple[float, float]]:
     query = f"""
     [out:json][timeout:25];
     (
@@ -110,13 +101,13 @@ def fetch_pois(center_lat: float, center_lon: float, radius_m: int, overpass_fil
     out body;
     """
     try:
-        response = requests.get(
+        resp = requests.get(
             "https://overpass-api.de/api/interpreter",
             params={"data": query},
             timeout=35,
         )
-        response.raise_for_status()
-        elements = response.json().get("elements", [])
+        resp.raise_for_status()
+        elements = resp.json().get("elements", [])
         return [(el["lat"], el["lon"]) for el in elements if "lat" in el and "lon" in el]
     except Exception:
         return []
@@ -124,33 +115,60 @@ def fetch_pois(center_lat: float, center_lon: float, radius_m: int, overpass_fil
 
 def generate_grid(center: Tuple[float, float], radius_km: float, points_per_side: int) -> List[Tuple[float, float]]:
     lat, lon = center
-    lat_range = radius_km / 111
-    lon_range = radius_km / (111 * max(math.cos(math.radians(lat)), 0.2))
-    lats = np.linspace(lat - lat_range, lat + lat_range, points_per_side)
-    lons = np.linspace(lon - lon_range, lon + lon_range, points_per_side)
+    lats = np.linspace(lat - radius_km / 111, lat + radius_km / 111, points_per_side)
+    lons = np.linspace(lon - radius_km / (111 * max(math.cos(math.radians(lat)), 0.2)),
+                       lon + radius_km / (111 * max(math.cos(math.radians(lat)), 0.2)),
+                       points_per_side)
     return [(float(la), float(lo)) for la in lats for lo in lons]
 
 
-def color_for_minutes(avg_minutes_per_trip: float) -> str:
-    # Green <= 20 mins, red >= 60 mins.
-    ratio = max(0.0, min(1.0, (avg_minutes_per_trip - 20) / 40))
-    red = int(255 * ratio)
-    green = int(255 * (1 - ratio))
-    return f"#{red:02x}{green:02x}33"
+def rgba_for_minutes(minutes_per_trip: float) -> List[int]:
+    # Green <=20 min, red >=60 min.
+    value = max(0.0, min(1.0, (minutes_per_trip - 20) / 40))
+    red = int(255 * value)
+    green = int(255 * (1 - value))
+    return [red, green, 40, 180]
 
 
-def build_anchor_from_state(item: Dict[str, str]) -> Anchor:
-    return Anchor(
-        name=item.get("name", "").strip(),
-        location_type=item.get("location_type", "Exact Address"),
-        address=item.get("address", "").strip(),
-        place_type=item.get("place_type", "Grocery Store"),
-        transport_mode_label=item.get("transport_mode_label", "Drive"),
-        trips_per_week=float(item.get("trips_per_week", 1) or 0),
-        after_anchor=item.get("after_anchor") or None,
-        time_profile=item.get("time_profile", "Average"),
-        custom_departure=item.get("custom_departure") or None,
-    )
+def resolve_anchor_rows(raw_df: pd.DataFrame) -> Tuple[List[Anchor], Dict[str, Tuple[float, float]], List[str]]:
+    errors: List[str] = []
+    anchors: List[Anchor] = []
+    address_coords: Dict[str, Tuple[float, float]] = {}
+
+    for _, row in raw_df.iterrows():
+        name = str(row["name"]).strip()
+        kind = str(row["kind"]).strip()
+        value = str(row["value"]).strip()
+        mode = str(row["mode"]).strip()
+        after_anchor_raw = str(row["after_anchor"]).strip()
+        after_anchor = after_anchor_raw if after_anchor_raw and after_anchor_raw.lower() != "none" else None
+
+        if not name:
+            continue
+        if kind not in {"address", "place_type"}:
+            errors.append(f"Anchor '{name}' has invalid kind.")
+            continue
+        if not value:
+            errors.append(f"Anchor '{name}' is missing a value.")
+            continue
+
+        freq = float(row["frequency_per_week"])
+        anchor = Anchor(name=name, kind=kind, value=value, mode=mode, frequency=freq, after_anchor=after_anchor)
+        anchors.append(anchor)
+
+        if kind == "address":
+            coord = geocode_address(value)
+            if not coord:
+                errors.append(f"Could not geocode address for '{name}'.")
+            else:
+                address_coords[name] = coord
+
+    anchor_names = {a.name for a in anchors}
+    for a in anchors:
+        if a.after_anchor and a.after_anchor not in anchor_names:
+            errors.append(f"Anchor '{a.name}' references missing after_anchor '{a.after_anchor}'.")
+
+    return anchors, address_coords, errors
 
 
 def compute_score_for_home(
@@ -163,292 +181,206 @@ def compute_score_for_home(
     total_weekly_minutes = 0.0
 
     for anchor in anchors:
-        if anchor.trips_per_week <= 0:
+        if anchor.frequency <= 0:
             continue
 
         if anchor.after_anchor:
-            origin = address_coords.get(anchor.after_anchor)
-            if not origin:
+            if anchor.after_anchor not in address_coords:
                 continue
+            origin = address_coords[anchor.after_anchor]
         else:
             origin = home
 
-        mode_code = TRANSPORT_OPTIONS[anchor.transport_mode_label]
-
-        if anchor.location_type == "Exact Address":
-            destination = address_coords.get(anchor.name)
-            if not destination:
+        if anchor.kind == "address":
+            if anchor.name not in address_coords:
                 continue
-            minutes = route_minutes(origin[0], origin[1], destination[0], destination[1], mode_code, ors_api_key)
+            dest = address_coords[anchor.name]
+            mins = route_minutes(origin[0], origin[1], dest[0], dest[1], anchor.mode, ors_api_key)
         else:
-            poi_candidates = pois_by_type.get(anchor.place_type, [])
-            if not poi_candidates:
+            candidates = pois_by_type.get(anchor.value, [])
+            if not candidates:
                 continue
 
-            nearest_candidates = sorted(poi_candidates, key=lambda p: geodesic(origin, p).km)[:12]
-            minutes = min(
-                route_minutes(origin[0], origin[1], p[0], p[1], mode_code, ors_api_key)
-                for p in nearest_candidates
+            # Pick nearest POI by estimated route minutes.
+            sampled = sorted(
+                candidates,
+                key=lambda p: geodesic(origin, p).km,
+            )[:12]
+            mins = min(
+                route_minutes(origin[0], origin[1], p[0], p[1], anchor.mode, ors_api_key)
+                for p in sampled
             )
 
-        minutes *= time_profile_multiplier(anchor.time_profile, anchor.custom_departure)
-        total_weekly_minutes += minutes * anchor.trips_per_week
+        total_weekly_minutes += mins * anchor.frequency
 
     return total_weekly_minutes
 
 
-def initialize_anchor_state() -> None:
-    if "anchors" not in st.session_state:
-        st.session_state.anchors = [
+def main() -> None:
+    st.title("🏠 Where To Live Optimizer")
+    st.caption("Find high-fit home zones from your life anchors (work, gym, grocery, trails, etc.).")
+
+    with st.sidebar:
+        st.header("Configuration")
+        ors_api_key = st.text_input("OpenRouteService API key (optional)", type="password")
+        st.markdown(
+            "Without an ORS key, travel times use distance-based approximations. "
+            "For realistic car/walk/bike/transit times, add a key."
+        )
+        search_radius_km = st.slider("Search radius around center (km)", 2, 30, 10)
+        grid_side = st.slider("Grid resolution (higher = slower)", 6, 30, 12)
+        poi_radius_m = st.slider("POI lookup radius (meters)", 1000, 30000, 12000, step=500)
+
+    st.subheader("Anchor locations")
+    st.write(
+        "Define locations/types that matter and how often you travel there. "
+        "Use `after_anchor` when trips usually happen after another fixed anchor (like work → gym)."
+    )
+
+    default = pd.DataFrame(
+        [
             {
                 "name": "Work",
-                "location_type": "Exact Address",
-                "address": "1 Market St, San Francisco, CA",
-                "place_type": "Grocery Store",
-                "transport_mode_label": "Drive",
-                "trips_per_week": 5,
+                "kind": "address",
+                "value": "1 Market St, San Francisco, CA",
+                "mode": "driving-car",
+                "frequency_per_week": 5,
                 "after_anchor": "",
-                "time_profile": "Average",
-                "custom_departure": "08:00",
             },
             {
                 "name": "Gym",
-                "location_type": "Type of Place",
-                "address": "",
-                "place_type": "Gym / Fitness",
-                "transport_mode_label": "Drive",
-                "trips_per_week": 4,
+                "kind": "place_type",
+                "value": "Gym",
+                "mode": "driving-car",
+                "frequency_per_week": 4,
                 "after_anchor": "Work",
-                "time_profile": "Average",
-                "custom_departure": "18:00",
+            },
+            {
+                "name": "Grocery",
+                "kind": "place_type",
+                "value": "Grocery Store",
+                "mode": "driving-car",
+                "frequency_per_week": 3,
+                "after_anchor": "",
             },
         ]
+    )
 
+    edited = st.data_editor(
+        default,
+        num_rows="dynamic",
+        use_container_width=True,
+        column_config={
+            "kind": st.column_config.SelectboxColumn("kind", options=["address", "place_type"]),
+            "mode": st.column_config.SelectboxColumn("mode", options=MODE_OPTIONS),
+            "value": st.column_config.SelectboxColumn(
+                "value",
+                options=list(PLACE_TYPE_TO_OVERPASS.keys()) + [""],
+                help="For address kind, type full address. For place_type, pick one option.",
+            ),
+            "frequency_per_week": st.column_config.NumberColumn(min_value=0, step=1),
+        },
+    )
 
-def render_anchor_editor() -> List[Anchor]:
-    initialize_anchor_state()
-    anchors_raw = st.session_state.anchors
-
-    st.subheader("Your Life Anchors")
-    st.write("Add important weekly destinations and habits. All labels are user-friendly and configurable.")
-
-    cols = st.columns([1, 1, 6])
-    if cols[0].button("➕ Add Anchor"):
-        anchors_raw.append(
-            {
-                "name": f"Anchor {len(anchors_raw) + 1}",
-                "location_type": "Exact Address",
-                "address": "",
-                "place_type": "Grocery Store",
-                "transport_mode_label": "Drive",
-                "trips_per_week": 1,
-                "after_anchor": "",
-                "time_profile": "Average",
-                "custom_departure": "08:00",
-            }
-        )
-        st.rerun()
-
-    if cols[1].button("➖ Remove Last") and anchors_raw:
-        anchors_raw.pop()
-        st.rerun()
-
-    anchor_names = [a.get("name", "") for a in anchors_raw if a.get("name", "")]
-
-    for idx, item in enumerate(anchors_raw):
-        with st.expander(f"Anchor {idx + 1}: {item.get('name', '') or 'Unnamed'}", expanded=True):
-            c1, c2, c3 = st.columns(3)
-            item["name"] = c1.text_input("Anchor Name", value=item.get("name", ""), key=f"name_{idx}")
-            item["location_type"] = c2.selectbox(
-                "Location Type",
-                ["Exact Address", "Type of Place"],
-                index=0 if item.get("location_type") == "Exact Address" else 1,
-                key=f"type_{idx}",
-            )
-            item["transport_mode_label"] = c3.selectbox(
-                "Transportation Mode",
-                list(TRANSPORT_OPTIONS.keys()),
-                index=list(TRANSPORT_OPTIONS.keys()).index(item.get("transport_mode_label", "Drive")),
-                key=f"mode_{idx}",
-            )
-
-            c4, c5, c6 = st.columns(3)
-            item["trips_per_week"] = c4.number_input(
-                "Trips Per Week",
-                min_value=0,
-                step=1,
-                value=int(item.get("trips_per_week", 1)),
-                key=f"freq_{idx}",
-            )
-            after_options = ["None"] + anchor_names
-            current_after = item.get("after_anchor") or "None"
-            if current_after not in after_options:
-                current_after = "None"
-            item["after_anchor"] = c5.selectbox(
-                "Usually Happens After",
-                after_options,
-                index=after_options.index(current_after),
-                key=f"after_{idx}",
-            )
-            if item["after_anchor"] == "None":
-                item["after_anchor"] = ""
-
-            item["time_profile"] = c6.selectbox(
-                "Transit Time Scenario",
-                TIME_PROFILES,
-                index=TIME_PROFILES.index(item.get("time_profile", "Average")),
-                key=f"profile_{idx}",
-            )
-
-            if item["location_type"] == "Exact Address":
-                item["address"] = st.text_input(
-                    "Address",
-                    value=item.get("address", ""),
-                    key=f"address_{idx}",
-                    placeholder="123 Main St, City, State",
-                )
-            else:
-                item["place_type"] = st.selectbox(
-                    "Place Type",
-                    list(PLACE_TYPE_TO_OVERPASS.keys()),
-                    index=list(PLACE_TYPE_TO_OVERPASS.keys()).index(item.get("place_type", "Grocery Store")),
-                    key=f"place_{idx}",
-                )
-
-            if item["time_profile"] == "Custom Departure Time":
-                t = st.time_input("Typical Departure Time", value=None, key=f"custom_time_{idx}")
-                item["custom_departure"] = t.strftime("%H:%M") if t else "08:00"
-
-    st.session_state.anchors = anchors_raw
-    return [build_anchor_from_state(item) for item in anchors_raw]
-
-
-def resolve_addresses(anchors: List[Anchor]) -> Tuple[Dict[str, Tuple[float, float]], List[str]]:
-    errors: List[str] = []
-    address_coords: Dict[str, Tuple[float, float]] = {}
-
-    for anchor in anchors:
-        if not anchor.name:
-            errors.append("One anchor is missing a name.")
-            continue
-        if anchor.location_type == "Exact Address":
-            if not anchor.address:
-                errors.append(f"'{anchor.name}' needs an address.")
-                continue
-            coord = geocode_address(anchor.address)
-            if not coord:
-                errors.append(f"Could not locate address for '{anchor.name}'.")
-                continue
-            address_coords[anchor.name] = coord
-
-    return address_coords, errors
-
-
-def build_map(
-    center: Tuple[float, float],
-    address_coords: Dict[str, Tuple[float, float]],
-    score_rows: Optional[List[Dict[str, float]]] = None,
-) -> None:
-    fmap = folium.Map(location=[center[0], center[1]], zoom_start=11, tiles="CartoDB positron")
-
-    for name, coord in address_coords.items():
-        folium.Marker(
-            location=[coord[0], coord[1]],
-            popup=f"{name}",
-            tooltip=name,
-            icon=folium.Icon(color="blue", icon="home", prefix="fa"),
-        ).add_to(fmap)
-
-    if score_rows:
-        for row in score_rows:
-            folium.CircleMarker(
-                location=[row["lat"], row["lon"]],
-                radius=7,
-                color=row["color"],
-                fill=True,
-                fill_opacity=0.55,
-                popup=(
-                    f"Avg minutes/trip: {row['avg_minutes_per_trip']:.1f}<br>"
-                    f"Weekly minutes: {row['weekly_minutes']:.1f}"
-                ),
-            ).add_to(fmap)
-
-    st_folium(fmap, use_container_width=True, height=560)
-
-
-def main() -> None:
-    st.title("🏠 Where To Live Optimizer")
-    st.caption("Find the best areas to live based on your real routines: work, gym, groceries, trails, and more.")
-
-    with st.sidebar:
-        st.header("Settings")
-        ors_api_key = st.text_input("OpenRouteService API Key (optional)", type="password")
-        st.info("If no key is provided, the app estimates travel time using distance and average speeds.")
-        search_radius_km = st.slider("Search Radius (km)", 2, 35, 10)
-        grid_side = st.slider("Map Resolution", 6, 30, 12)
-        poi_radius_m = st.slider("POI Search Radius (meters)", 1000, 30000, 12000, step=500)
-
-    anchors = render_anchor_editor()
-    address_coords, address_errors = resolve_addresses(anchors)
-
-    if address_coords:
-        center = (
-            float(np.mean([c[0] for c in address_coords.values()])),
-            float(np.mean([c[1] for c in address_coords.values()])),
-        )
-    else:
-        center = (39.5, -98.35)
-
-    st.subheader("Map")
-    st.write("Map loads immediately so you can explore. Pins mark any exact-address anchors.")
-    build_map(center, address_coords)
-
-    if address_errors:
-        for msg in address_errors:
-            st.warning(msg)
-
-    if st.button("Generate Commute Heatmap", type="primary"):
-        if not address_coords:
-            st.error("Please add at least one valid exact address anchor before generating the heatmap.")
+    if st.button("Generate heatmap", type="primary"):
+        anchors, address_coords, errors = resolve_anchor_rows(edited)
+        if not anchors:
+            st.error("Please add at least one valid anchor.")
             return
 
+        if errors:
+            for err in errors:
+                st.warning(err)
+
+        fixed_points = list(address_coords.values())
+        if not fixed_points:
+            st.error("At least one address anchor is needed to center the search area.")
+            return
+
+        center = (
+            float(np.mean([p[0] for p in fixed_points])),
+            float(np.mean([p[1] for p in fixed_points])),
+        )
+
+        st.info("Fetching place-type points of interest...")
         pois_by_type: Dict[str, List[Tuple[float, float]]] = {}
         for anchor in anchors:
-            if anchor.location_type == "Type of Place":
-                filter_expr = PLACE_TYPE_TO_OVERPASS.get(anchor.place_type)
-                if not filter_expr:
-                    st.warning(f"Unsupported place type for '{anchor.name}'.")
-                    continue
-                if anchor.place_type not in pois_by_type:
-                    pois_by_type[anchor.place_type] = fetch_pois(center[0], center[1], poi_radius_m, filter_expr)
-                    st.write(f"{anchor.place_type}: found {len(pois_by_type[anchor.place_type])} matches")
+            if anchor.kind != "place_type":
+                continue
+            if anchor.value not in PLACE_TYPE_TO_OVERPASS:
+                st.warning(f"Unsupported place type '{anchor.value}' for anchor '{anchor.name}'.")
+                continue
+            if anchor.value not in pois_by_type:
+                pois = fetch_pois(center[0], center[1], poi_radius_m, PLACE_TYPE_TO_OVERPASS[anchor.value])
+                pois_by_type[anchor.value] = pois
+                st.write(f"{anchor.value}: found {len(pois)} matching points")
 
+        st.info("Scoring candidate home cells...")
         cells = generate_grid(center, search_radius_km, grid_side)
-        total_trips = max(sum(a.trips_per_week for a in anchors if a.trips_per_week > 0), 1)
 
-        score_rows: List[Dict[str, float]] = []
+        scored_rows = []
         for lat, lon in cells:
             weekly = compute_score_for_home((lat, lon), anchors, address_coords, pois_by_type, ors_api_key or None)
-            per_trip = weekly / total_trips
-            score_rows.append(
+            per_trip = weekly / max(sum(a.frequency for a in anchors if a.frequency > 0), 1)
+            scored_rows.append(
                 {
                     "lat": lat,
                     "lon": lon,
                     "weekly_minutes": weekly,
                     "avg_minutes_per_trip": per_trip,
-                    "color": color_for_minutes(per_trip),
+                    "color": rgba_for_minutes(per_trip),
                 }
             )
 
-        score_rows = sorted(score_rows, key=lambda x: x["weekly_minutes"])
-        best = score_rows[0]
+        score_df = pd.DataFrame(scored_rows).sort_values("weekly_minutes")
+        st.success("Done. Lower weekly minutes = better fit.")
 
-        c1, c2 = st.columns(2)
-        c1.metric("Best Weekly Minutes", f"{best['weekly_minutes']:.1f}")
-        c2.metric("Best Avg Minutes per Trip", f"{best['avg_minutes_per_trip']:.1f}")
+        best = score_df.iloc[0]
+        st.metric("Best candidate weekly minutes", f"{best['weekly_minutes']:.1f}")
+        st.metric("Best candidate avg minutes/trip", f"{best['avg_minutes_per_trip']:.1f}")
 
-        st.subheader("Heatmap + Pins")
-        build_map(center, address_coords, score_rows)
+        anchor_df = pd.DataFrame(
+            [
+                {"lat": c[0], "lon": c[1], "label": name}
+                for name, c in address_coords.items()
+            ]
+        )
+
+        layer_cells = pdk.Layer(
+            "ScatterplotLayer",
+            data=score_df,
+            get_position="[lon, lat]",
+            get_fill_color="color",
+            get_radius=220,
+            pickable=True,
+            opacity=0.65,
+        )
+        layers = [layer_cells]
+
+        if not anchor_df.empty:
+            layers.append(
+                pdk.Layer(
+                    "ScatterplotLayer",
+                    data=anchor_df,
+                    get_position="[lon, lat]",
+                    get_fill_color="[20,20,20,255]",
+                    get_radius=320,
+                    pickable=True,
+                )
+            )
+
+        deck = pdk.Deck(
+            map_style="mapbox://styles/mapbox/light-v9",
+            initial_view_state=pdk.ViewState(latitude=center[0], longitude=center[1], zoom=11),
+            layers=layers,
+            tooltip={
+                "html": "<b>Avg minutes/trip:</b> {avg_minutes_per_trip}<br/><b>Weekly minutes:</b> {weekly_minutes}",
+                "style": {"color": "white"},
+            },
+        )
+
+        st.pydeck_chart(deck, use_container_width=True)
+        st.dataframe(score_df.head(20), use_container_width=True)
 
 
 if __name__ == "__main__":

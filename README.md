@@ -1,81 +1,48 @@
 # Where To Live Optimizer
 
-A Python web app that helps people find better places to live using real weekly anchors (work, gym, grocery, trails, etc.) and a visual commute heatmap.
+A simple Python web app that helps people find better places to live using anchor points in their weekly life (work, gym, grocery, trails, etc.).
 
-## What this implements
+## What this MVP implements
 
-- Weighted scoring model using weekly trip frequency.
-- Mixed anchors: exact addresses + flexible place types.
-- Sequencing support (`Usually Happens After`) for routines like work → gym.
-- Time-of-day scenario controls (`Average`, `Worst Case`, or `Custom Departure Time`).
-- Live map that loads by default, shows anchor pins, and overlays colored candidate cells.
+This covers the week 1 to week 3 goals:
+
+- **Week 1:** Input model + weighted scoring engine.
+- **Week 2:** POI lookup for place types + interactive map heat coloring.
+- **Week 3:** Sequencing via `after_anchor` (example: work -> gym).
 
 ## Inputs supported
 
-For each anchor, the UI supports:
+Each anchor row includes:
 
-1. **Transportation Mode** (Drive, Bike, Walk, Public Transit)
-2. **Trips Per Week**
-3. **Location Type** (`Exact Address` or `Type of Place`)
-4. **Usually Happens After** (optional sequencing)
-5. **Transit Time Scenario** (`Average`, `Worst Case`, `Custom Departure Time`)
+1. `mode` (driving, cycling, walking, transit)
+2. `frequency_per_week`
+3. `kind` (`address` or `place_type`)
+4. `after_anchor` (optional; usually for chained habits like work -> gym)
 
 Behavior:
 
-- If `Location Type = Exact Address`, you enter a full address.
-- If `Location Type = Type of Place`, you select a place category (e.g., Grocery Store, Gym / Fitness).
+- If `kind=address`, routing is to that specific address.
+- If `kind=place_type`, any matching POI can satisfy the trip; the app chooses the best nearby option.
 
 ## Running locally
 
-### Windows (PowerShell)
-
-```powershell
-py -m venv .venv
-.\.venv\Scripts\Activate.ps1
-py -m pip install --upgrade pip
-py -m pip install -r requirements.txt
-py -m streamlit run app.py
-```
-
-If PowerShell blocks activation, run this once and retry:
-
-```powershell
-Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
-```
-
-### Windows (Command Prompt / cmd)
-
-```bat
-py -m venv .venv
-.venv\Scripts\activate.bat
-py -m pip install --upgrade pip
-py -m pip install -r requirements.txt
-py -m streamlit run app.py
-```
-
-### macOS / Linux
-
 ```bash
-python3 -m venv .venv
+python -m venv .venv
 source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-python -m streamlit run app.py
+pip install -r requirements.txt
+streamlit run app.py
 ```
 
-## Troubleshooting
-
-- `streamlit is not recognized`: run with `py -m streamlit run app.py` (Windows) or `python -m streamlit run app.py`.
-- `source is not recognized` on Windows: use `.\.venv\Scripts\Activate.ps1` (PowerShell) or `.venv\Scripts\activate.bat` (cmd).
-- If `py` is not found, install Python from python.org and enable **Add Python to PATH**.
+Then open the local Streamlit URL shown in terminal.
 
 ## API notes
 
-- Optional OpenRouteService API key for realistic drive/bike/walk routing.
-- Without a key, the app uses distance/speed estimation fallback.
-- Place-type lookup uses Overpass (OpenStreetMap).
+- You can provide an **OpenRouteService API key** for real route-time estimates.
+- Without a key, the app falls back to distance/speed approximations.
+- Place type search is done using Overpass (OpenStreetMap data).
 
 ## Current limitations
 
-- Sequencing currently requires `Usually Happens After` to refer to a named exact-address anchor.
-- Public transit routing is estimated in fallback mode.
+- `after_anchor` currently expects a named **address anchor** for route chaining.
+- Transit mode is estimated unless your ORS key/profile setup supports your region.
+- This is an MVP and does not yet include housing listing overlays.
