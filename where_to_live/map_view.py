@@ -8,6 +8,7 @@ def build_map(
     center: Tuple[float, float],
     address_coords: Dict[str, Tuple[float, float]],
     score_rows: Optional[List[Dict[str, float]]] = None,
+    isochrone_features: Optional[List[Dict]] = None,
     map_key: str = "map",
 ) -> None:
     fmap = folium.Map(location=[center[0], center[1]], zoom_start=11, tiles="CartoDB positron")
@@ -32,6 +33,20 @@ def build_map(
                     f"Avg minutes/trip: {row['avg_minutes_per_trip']:.1f}<br>"
                     f"Weekly minutes: {row['weekly_minutes']:.1f}"
                 ),
+            ).add_to(fmap)
+
+    if isochrone_features:
+        for feature in isochrone_features:
+            anchor_name = feature.get("properties", {}).get("anchor_name", "Isochrone")
+            folium.GeoJson(
+                feature,
+                tooltip=anchor_name,
+                style_function=lambda _: {
+                    "color": "#7e57c2",
+                    "weight": 2,
+                    "fillColor": "#7e57c2",
+                    "fillOpacity": 0.2,
+                },
             ).add_to(fmap)
 
     st_folium(fmap, use_container_width=True, height=560, key=map_key)
