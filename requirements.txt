@@ -1,0 +1,6 @@
+streamlit>=1.44
+pandas>=2.2
+numpy>=1.26
+requests>=2.32
+pydeck>=0.9
+geopy>=2.4
