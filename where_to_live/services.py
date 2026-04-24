@@ -98,9 +98,9 @@ def fetch_pois(
     out body center;
     """
     try:
-        response = requests.get(
+        response = requests.post(
             "https://overpass-api.de/api/interpreter",
-            params={"data": query},
+            data={"data": query},
             timeout=35,
         )
         response.raise_for_status()

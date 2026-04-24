@@ -68,6 +68,19 @@ if address_errors:
 if st.button("Generate Commute Heatmap", type="primary"):
     clear_debug_logs()
     debug_log("Heatmap generation triggered by user")
+    debug_log(
+        "User settings: "
+        f"search_radius_km={search_radius_km}, grid_side={grid_side}, poi_radius_m={poi_radius_m}, "
+        f"transport_mode={transport_mode}, range_type={range_type}, isochrone_value={isochrone_value}, "
+        f"ors_key_present={bool(ors_api_key)}"
+    )
+    for anchor in anchors:
+        debug_log(
+            "Anchor input: "
+            f"name='{anchor.name}', location_type='{anchor.location_type}', address='{anchor.address}', "
+            f"place_type='{anchor.place_type}', trips_per_week={anchor.trips_per_week}, "
+            f"transport_mode='{anchor.transport_mode_label}', after_anchor='{anchor.after_anchor}'"
+        )
     st.session_state["heatmap_results"] = None
     st.session_state["isochrone_results"] = None
     if not address_coords:
@@ -130,6 +143,7 @@ if st.button("Generate Commute Heatmap", type="primary"):
         st.stop()
 
     first_polygon_geometry = isochrone_features[0].get("geometry", {})
+    debug_log(f"First isochrone geometry type: {first_polygon_geometry.get('type', 'unknown')}")
     cells = [pt for pt in cells if point_in_geojson(pt[0], pt[1], first_polygon_geometry)]
     debug_log(f"Isochrone clip retained {len(cells)} candidate cells based on the first anchor")
     st.session_state["isochrone_results"] = {
